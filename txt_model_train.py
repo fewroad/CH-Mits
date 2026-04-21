@@ -1,3 +1,7 @@
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['HF_HUB_OFFLINE'] = '0'
+
 import pickle
 
 import torch
@@ -13,26 +17,52 @@ from model import Transformer, Gru_Model, BiLstm_Model, Lstm_Model, Rnn_Model, T
     SKNetandLSTM_Model
 
 
+TEXT_MODEL_CONFIG = {
+    'bert': {
+        'tokenizer_name': 'bert-base-uncased',
+        'model_name': 'bert-base-uncased',
+        'tokenizer_kwargs': {},
+    },
+    'roberta': {
+        'tokenizer_name': 'roberta-base',
+        'model_name': 'roberta-base',
+        'tokenizer_kwargs': {'add_prefix_space': True},
+    },
+    'chi_bert': {
+        'tokenizer_name': 'bert-base-chinese',
+        'model_name': 'bert-base-chinese',
+        'tokenizer_kwargs': {},
+    },
+    'ernie': {
+        'tokenizer_name': 'nghuyong/ernie-3.0-base-zh',
+        'model_name': 'nghuyong/ernie-3.0-base-zh',
+        'tokenizer_kwargs': {},
+    },
+}
+
+
+def build_text_backbone(model_name):
+    if model_name not in TEXT_MODEL_CONFIG:
+        raise ValueError(f'unknown model: {model_name}')
+
+    model_config = TEXT_MODEL_CONFIG[model_name]
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_config['tokenizer_name'],
+        **model_config['tokenizer_kwargs'],
+    )
+    base_model = AutoModel.from_pretrained(model_config['model_name'])
+    input_size = getattr(base_model.config, 'hidden_size', 768)
+    return tokenizer, base_model, input_size
+
+
 class Niubility:
     def __init__(self, args, logger):
         self.args = args
         self.logger = logger
         self.logger.info('> creating model {}'.format(args.model_name))
         # Create model
-        if args.model_name == 'bert':
-            self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-            self.input_size = 768
-            base_model = AutoModel.from_pretrained('bert-base-uncased')
-        elif args.model_name == 'roberta':
-            self.tokenizer = AutoTokenizer.from_pretrained('roberta-base', add_prefix_space=True)
-            self.input_size = 768
-            base_model = AutoModel.from_pretrained('roberta-base')
-        elif args.model_name == 'chi_bert':
-            self.tokenizer = AutoTokenizer.from_pretrained('bert-base-chinese')
-            self.input_size = 768
-            base_model = AutoModel.from_pretrained('bert-base-chinese')
-        else:
-            raise ValueError('unknown model')
+        self.tokenizer, base_model, self.input_size = build_text_backbone(args.model_name)
+        self.model_save_path = f'{args.model_name}_{args.method_name}.pkl'
         # Operate the method
         if args.method_name == 'fnn':
             self.Mymodel = Transformer(base_model, args.num_classes, self.input_size)
@@ -127,20 +157,19 @@ class Niubility:
 
         l_acc, l_trloss, l_teloss, l_epo = [], [], [], []
         # Get the best_loss and the best_acc
-        best_loss, best_acc = 0, 0
-        with open('bert-lstm.pkl', "wb") as file:
-            for epoch in range(self.args.num_epoch):
-                train_loss, train_acc = self._train(train_dataloader, criterion, optimizer)
-                test_loss, test_acc = self._test(test_dataloader, criterion)
-                l_epo.append(epoch), l_acc.append(test_acc), l_trloss.append(train_loss), l_teloss.append(test_loss)
-                if test_acc > best_acc or (test_acc == best_acc and test_loss < best_loss):
-                    best_acc, best_loss = test_acc, test_loss
-
+        best_loss, best_acc = float('inf'), 0
+        for epoch in range(self.args.num_epoch):
+            train_loss, train_acc = self._train(train_dataloader, criterion, optimizer)
+            test_loss, test_acc = self._test(test_dataloader, criterion)
+            l_epo.append(epoch), l_acc.append(test_acc), l_trloss.append(train_loss), l_teloss.append(test_loss)
+            if test_acc > best_acc or (test_acc == best_acc and test_loss < best_loss):
+                best_acc, best_loss = test_acc, test_loss
+                with open(self.model_save_path, "wb") as file:
                     pickle.dump(self.Mymodel, file)
-                self.logger.info(
-                    '{}/{} - {:.2f}%'.format(epoch + 1, self.args.num_epoch, 100 * (epoch + 1) / self.args.num_epoch))
-                self.logger.info('[train] loss: {:.4f}, acc: {:.2f}'.format(train_loss, train_acc * 100))
-                self.logger.info('[test] loss: {:.4f}, acc: {:.2f}'.format(test_loss, test_acc * 100))
+            self.logger.info(
+                '{}/{} - {:.2f}%'.format(epoch + 1, self.args.num_epoch, 100 * (epoch + 1) / self.args.num_epoch))
+            self.logger.info('[train] loss: {:.4f}, acc: {:.2f}'.format(train_loss, train_acc * 100))
+            self.logger.info('[test] loss: {:.4f}, acc: {:.2f}'.format(test_loss, test_acc * 100))
 
 
         # with open('textcnn_lstm_attention.pkl', "rb") as file:
@@ -152,6 +181,7 @@ class Niubility:
 
         self.logger.info('best loss: {:.4f}, best acc: {:.2f}'.format(best_loss, best_acc * 100))
         self.logger.info('log saved: {}'.format(self.args.log_name))
+        self.logger.info('model saved: {}'.format(self.model_save_path))
 
         # Draw the training process
         plt.plot(l_epo, l_acc)
