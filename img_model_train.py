@@ -1,24 +1,22 @@
+import os
 import pickle
+
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['HF_HUB_OFFLINE'] = '0'
 
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from matplotlib import pyplot as plt
+from PIL import Image
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import transforms
-from torchvision.models import resnet18
-from PIL import Image
-import os
-
 from tqdm import tqdm
-from transformers import ViTModel
-from functools import partial
-import torch.nn.functional as F
+from transformers import SwinModel
 
 
-data_folder = 'D:\ei\Sentiment_Analysis_Imdb-master\cnn+vit\cnn+vit\image_test'
 batch_size = 32
 
 data_transforms = transforms.Compose([
@@ -73,62 +71,49 @@ def load_dataset(train_batch_size, test_batch_size,workers=0):
                               pin_memory=True)
     return train_loader, test_loader
 
-# train_dataset = CustomDataset(os.path.join(data_folder, 'train'), transform=data_transforms)
-# test_dataset = CustomDataset(os.path.join(data_folder, 'test'), transform=data_transforms)
-# train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-# test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
 train_dataloader, test_dataloader = load_dataset(batch_size,batch_size)
-
-class ConvNet(nn.Module):
-    def __init__(self, num_classes):
-        super(ConvNet, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        self.fc = nn.Linear(64 * 28 * 28, num_classes)
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
-        return x
+LOCAL_SWIN_MODEL_PATH = os.environ.get(
+    'SWIN_LOCAL_PATH',
+    r'D:\ei\Sentiment_Analysis_Imdb-master\swin\weight'
+)
+DEFAULT_SWIN_MODEL_NAME = os.environ.get(
+    'SWIN_MODEL_NAME',
+    'microsoft/swin-tiny-patch4-window7-224'
+)
 
 
-local_model_path = 'D:\ei\Sentiment_Analysis_Imdb-master\cnn+vit\cnn+vit\weight'
-vit_model = ViTModel.from_pretrained(local_model_path)
-vit_model.training = True
+def load_swin_backbone():
+    if os.path.isdir(LOCAL_SWIN_MODEL_PATH):
+        print(f"Loading local Swin weights from: {LOCAL_SWIN_MODEL_PATH}")
+        return SwinModel.from_pretrained(LOCAL_SWIN_MODEL_PATH)
 
-vit_model.config.num_labels = 2
-vit_model.classifier = nn.Linear(vit_model.config.hidden_size, vit_model.config.num_labels)
+    print(f"Local Swin weights not found at: {LOCAL_SWIN_MODEL_PATH}")
+    print(f"Trying to download pretrained Swin model: {DEFAULT_SWIN_MODEL_NAME}")
+    return SwinModel.from_pretrained(DEFAULT_SWIN_MODEL_NAME)
 
 
-class CombinedModel(nn.Module):
-    def __init__(self, cnn_model, vit_model, num_classes):
-        super(CombinedModel, self).__init__()
-        self.cnn_model = cnn_model
-        self.vit_model = vit_model
-        self.fc = nn.Linear(vit_model.config.hidden_size + 50176, 1536)
+class SwinClassifier(nn.Module):
+    def __init__(self, swin_model, num_classes):
+        super(SwinClassifier, self).__init__()
+        self.swin_model = swin_model
+        hidden_size = getattr(swin_model.config, 'hidden_size', swin_model.config.embed_dim)
+        self.fc = nn.Linear(hidden_size, 1536)
         self.adjust = nn.Linear(1536, num_classes)
 
+    def extract_features(self, x):
+        outputs = self.swin_model(pixel_values=x)
+        if getattr(outputs, 'pooler_output', None) is not None:
+            return outputs.pooler_output
+        return outputs.last_hidden_state.mean(dim=1)
+
     def forward(self, x):
-        cnn_features = self.cnn_model(x)
-        vit_features = self.vit_model(x).last_hidden_state[:,0,:]
-        combined_features = torch.cat((cnn_features, vit_features), dim=1)
-        feature = self.fc(combined_features)
-        x = self.adjust(feature)
-        return x
+        features = self.extract_features(x)
+        features = self.fc(features)
+        return self.adjust(features)
 
 num_classes = 2
-cnn_model = ConvNet(num_classes)
-combined_model = CombinedModel(cnn_model, vit_model, 2)
+swin_model = load_swin_backbone()
+combined_model = SwinClassifier(swin_model, num_classes)
 
 
 num_epochs = 50
@@ -191,7 +176,7 @@ def evaluate(model, dataloader, criterion, device):
 
     return val_loss, val_acc
 
-best_loss, best_acc = 0, 0
+best_loss, best_acc = float('inf'), 0
 l_acc, l_trloss, l_teloss, l_epo = [], [], [], []
 for epoch in range(num_epochs):
     train_loss, train_acc = train(combined_model, train_dataloader, criterion, optimizer, device)
@@ -202,7 +187,7 @@ for epoch in range(num_epochs):
     l_epo.append(epoch)
     if val_acc > best_acc or (val_acc == best_acc and val_loss < best_loss):
         best_acc, best_loss = val_acc, val_loss
-        with open('cv_combine.pkl', "wb") as file:
+        with open('swin_transformer.pkl', "wb") as file:
             pickle.dump(combined_model, file)
 
     print(f"Epoch {epoch+1}/{num_epochs}")
