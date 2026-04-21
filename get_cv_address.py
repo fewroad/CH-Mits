@@ -1,8 +1,8 @@
 import os
 import pandas as pd
 
-p_root = 'D:\ei\Sentiment_Analysis_Imdb-master\p'
-n_root = 'D:\ei\Sentiment_Analysis_Imdb-master/n'
+p_root = '/root/lanyun-tmp/Sentiment_Analysis_Imdb-master/p'
+n_root = '/root/lanyun-tmp/Sentiment_Analysis_Imdb-master/n'
 
 
 print(os.listdir(n_root))
@@ -25,4 +25,4 @@ for it in os.listdir(n_root):
 
 df = pd.DataFrame({'labels': label_li,'sentences': address_li})
 
-df.to_csv('D:/ei/Sentiment_Analysis_Imdb-master/cv_address.csv', index=False, encoding="utf-8")
+df.to_csv('/root/lanyun-tmp/Sentiment_Analysis_Imdb-master/cv_address.csv', index=False, encoding="utf-8")
