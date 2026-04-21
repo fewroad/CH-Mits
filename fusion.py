@@ -18,16 +18,33 @@ from PIL import Image
 import os
 import jieba
 from tqdm import tqdm
-from transformers import ViTModel, AutoTokenizer
+from transformers import AutoTokenizer
 from functools import partial
 
 import torch.nn.functional as F
 
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+os.environ.setdefault('HF_HUB_OFFLINE', '0')
 
 fusion_method = 'LAFF'
 txt_method = 'sknetandlstm'
-img_method = 'cnn_vit'
+txt_model_name = 'ernie'
+img_method = 'swin'
 datalength = 1
+PROJECT_ROOT = os.environ.get('PROJECT_ROOT', os.path.dirname(os.path.abspath(__file__)))
+LOCAL_ERNIE_PATH = os.environ.get('ERNIE_LOCAL_PATH')
+
+
+def read_csv_with_fallback(filename, **kwargs):
+    csv_path = os.path.join(PROJECT_ROOT, filename)
+    encodings = ('utf-8', 'gbk')
+    last_error = None
+    for encoding in encodings:
+        try:
+            return pd.read_csv(csv_path, encoding=encoding, **kwargs)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise last_error
 
 class FusionModel(nn.Module):
     def __init__(self):
@@ -191,10 +208,9 @@ class FusionModel(nn.Module):
         x = self.fc(fusion_output)
         return x
 
-from a import segmentor, clean_stopwords
 
 text = '小档 溢 自由感 开心 快乐 永远'
-img = 'D:\ei\Sentiment_Analysis_Imdb-master\p/p107/image_1.jpg'
+img = os.path.join(PROJECT_ROOT, 'p', 'p107', 'image_1.jpg')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 batch_size = 32
@@ -263,7 +279,7 @@ def my_collate(batch, tokenizer):
 
 # Load dataset
 def load_txt_dataset(tokenizer, train_batch_size, test_batch_size, model_name, method_name, workers):
-    data = pd.read_csv('label.csv', sep=None, header=0, encoding='utf-8', engine='python')
+    data = read_csv_with_fallback('label.csv', sep=None, header=0, engine='python')
     len1 = int(len(list(data['labels'])) )
     labels = list(data['labels'])[0:len1]
     sentences = list(data['sentences'])[0:len1]
@@ -306,7 +322,7 @@ class CustomDataset(Dataset):
 
         return image, label
 def load_dataset(train_batch_size, test_batch_size,workers=0):
-    data = pd.read_csv('label.csv',encoding='utf-8', engine='python')
+    data = read_csv_with_fallback('label.csv', engine='python')
     len1 = int(len(list(data['labels'])))
     labels = list(data['labels'])[0:len1]
     sentences = list(data['sentences'])[0:len1]
@@ -338,6 +354,26 @@ class CombinedModel(nn.Module):
         x = self.fc1(combined_features)
         res = self.fc2(x)
         return res
+
+
+class SwinClassifier(nn.Module):
+    def __init__(self, swin_model, num_classes):
+        super(SwinClassifier, self).__init__()
+        self.swin_model = swin_model
+        hidden_size = getattr(swin_model.config, 'hidden_size', swin_model.config.embed_dim)
+        self.fc = nn.Linear(hidden_size, 1536)
+        self.adjust = nn.Linear(1536, num_classes)
+
+    def extract_features(self, x):
+        outputs = self.swin_model(pixel_values=x)
+        if getattr(outputs, 'pooler_output', None) is not None:
+            return outputs.pooler_output
+        return outputs.last_hidden_state.mean(dim=1)
+
+    def forward(self, x):
+        features = self.extract_features(x)
+        features = self.fc(features)
+        return self.adjust(features)
 
 # class VGG(nn.Module):
 #     def __init__(self,  num_classes=2):
@@ -387,16 +423,16 @@ class ConvNet(nn.Module):
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if txt_method == 'sknet_lstm_attention':
-    txt_model = pickle.load(file=open('D:\ei\Sentiment_Analysis_Imdb-master/baseline_text_96.79.pkl', 'rb'))
+    txt_model = pickle.load(file=open(os.path.join(PROJECT_ROOT, 'baseline_text_96.79.pkl'), 'rb'))
 elif txt_method == 'attention':
-    txt_model = pickle.load(file=open('D:\ei\Sentiment_Analysis_Imdb-master/attention.pkl', 'rb'))
+    txt_model = pickle.load(file=open(os.path.join(PROJECT_ROOT, 'attention.pkl'), 'rb'))
 elif txt_method == 'bert-lstm' or txt_method == 'sknet_lstm' or txt_method == 'sknetandlstm':
-    txt_model = pickle.load(file=open('D:\ei\Sentiment_Analysis_Imdb-master/bert-lstm.pkl', 'rb'))
+    txt_model = pickle.load(file=open(os.path.join(PROJECT_ROOT, f'{txt_model_name}_{txt_method}.pkl'), 'rb'))
 
 if img_method == 'vgg':
-    img_model = pickle.load(file=open('D:\ei\Sentiment_Analysis_Imdb-master/vgg1536.pkl', 'rb'))
-elif img_method == 'cnn_vit':
-    img_model = pickle.load(file=open('D:\ei\Sentiment_Analysis_Imdb-master/cnn+vit/cnn+vit/cv_combine.pkl', 'rb'))
+    img_model = pickle.load(file=open(os.path.join(PROJECT_ROOT, 'vgg1536.pkl'), 'rb'))
+elif img_method == 'swin':
+    img_model = pickle.load(file=open(os.path.join(PROJECT_ROOT, 'swin_transformer.pkl'), 'rb'))
 
 
 def extract_txt_feature(txt_model,sentence,label,method=txt_method):
@@ -542,13 +578,9 @@ def extract_img_feature(img_model, img, label):
             if i == 6:
                 break
         return x
-    elif img_method == 'cnn_vit':
+    elif img_method == 'swin':
         img.to(device)
-        cnn_features = img_model.cnn_model(img)
-        vit_features = img_model.vit_model(img).last_hidden_state[:, 0, :]
-        combined_features = torch.cat((cnn_features, vit_features), dim=1)
-        x = img_model.fc(combined_features)
-        return x
+        return img_model.fc(img_model.extract_features(img))
 
 # trdata, tedata = load_txt_dataset(tokenizer=AutoTokenizer.from_pretrained('bert-base-chinese'),
 #                                   train_batch_size=1,
@@ -592,8 +624,9 @@ def extract_img_feature(img_model, img, label):
 # 提取文本特征
 def extract_txt_features():
     txt_model.to(device)
-    tokenizer=AutoTokenizer.from_pretrained('bert-base-chinese')
-    data = pd.read_csv('label.csv', sep=None, header=0, encoding='gbk', engine='python')
+    tokenizer_source = LOCAL_ERNIE_PATH if LOCAL_ERNIE_PATH and os.path.isdir(LOCAL_ERNIE_PATH) else 'nghuyong/ernie-3.0-base-zh'
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+    data = read_csv_with_fallback('label.csv', sep=None, header=0, engine='python')
     len1 = int(len(list(data['labels'])) * datalength )
     labels = list(data['labels'])[0:len1]
     sentences = list(data['sentences'])[0:len1]
@@ -623,7 +656,7 @@ def extract_txt_features():
 # 提取图像特征
 def extract_img_features():
     img_model.to(device)
-    data = pd.read_csv('cv_address.csv', sep=None, header=0, encoding='gbk', engine='python')
+    data = read_csv_with_fallback('cv_address.csv', sep=None, header=0, engine='python')
     len1 = int(len(list(data['labels'])) * datalength)
     labels = list(data['labels'])[0:len1]
     sentences = list(data['sentences'])[0:len1]
@@ -653,7 +686,7 @@ class FusionDataloader(Dataset):
 
 txt_features = extract_txt_features()
 img_features = extract_img_features()
-data = pd.read_csv('cv_address.csv', sep=None, header=0, encoding='gbk', engine='python')
+data = read_csv_with_fallback('cv_address.csv', sep=None, header=0, engine='python')
 len1 = int(len(list(data['labels'])) * datalength )
 labels = list(data['labels'])[0:len1]
 
